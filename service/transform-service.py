@@ -72,26 +72,31 @@ if authorization:
 else:
         session_factory = BasicUrlSystem({"headers": headers})
 
-logger.info('doing stuff')
 
 @app.route("/workorders", methods=["POST"])
 def receiver():
 
     def do_request(session: requests.Session, method: str, entity: dict):
+        resp = None
         if method == 'update':
             resp = session.put(f'{url}/ElWinAvtaler/api/workorders', json=entity)
         elif method == 'get':
             resp = session.get(f'{url}/ElWinAvtaler/api/workorders?externalIds={entity["ExternalId"]}')
         elif method == 'create':
             resp = session.post(f'{url}/ElWinAvtaler/api/workorders', json=entity)
+        else:
+            logger.critical(f'Critical internal error. "{method}" not valid! Please verify the code. Exiting')
+            exit(-1)
+
         returnval = resp.content.decode('UTF-8')
-        logger.debug(f'Method {method} for entity {entity["_id"]} gave response {returnval}')
-        print(f'Method {method} for entity {entity["_id"]} gave response {returnval}')
+        logger.debug(f'Method "{method}" for "{entity["_id"]}" gave "{returnval}" & status code: "{resp.status_code}"')
         return returnval
+
 
     def generate(entities):
         with session_factory.make_session() as s:
             for entity in entities:
+
                 # If entity has Id then we just update
                 if entity.get('Id', None) is not None:
                     returnval = do_request(s, 'update', entity)
@@ -99,9 +104,13 @@ def receiver():
                     #If response is not JSON then we need to create the entity
                     try:
                         response_entity = json.loads(do_request(s, 'get', entity))
-                    except json.JSONDecodeError:
-                        logger.debug(f'Could not GET entity {entity["ExternalId"]}')
-                        print(f'Could not GET entity {entity["ExternalId"]}')
+                        if type(response_entity) == list:
+                            if len(response_entity) == 1:
+                                response_entity = response_entity[0]
+                        else:
+                            response_entity = {}
+                    except json.JSONDecodeError as e:
+                        logger.debug(f'Could not GET entity "{entity["ExternalId"]}" because of error: "{e}"')
                         response_entity = {}
 
                     # If we find the Id then we update, else we create.
@@ -121,8 +130,6 @@ def receiver():
     # get entities from request
     entities = request.get_json()
     response_data = generate(entities)
-    logger.debug('i did something')
-    print('i did something')
     return Response(response=response_data)
 
 
