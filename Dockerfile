@@ -11,5 +11,5 @@ WORKDIR /service
 RUN pip install --upgrade pip
 RUN pip install -r requirements.txt
 
-EXPOSE 5001/tcp
+EXPOSE 5000/tcp
 CMD ["python3", "-u", "transform-service.py"]

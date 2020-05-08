@@ -16,12 +16,16 @@ PORT = int(os.environ.get("PORT", 5001))
 
 logger = sesam_logger("rest-transform-service")
 
+prop = os.environ.get("PROPERTY", "response")
+payload_property = os.environ.get("PAYLOAD_PROPERTY_FOR_TRANSFORM_REQUEST", "payload")
+method = os.environ.get("METHOD", "GET").upper()
 url = os.environ["URL"]
 headers = json.loads(os.environ.get("HEADERS", "{}"))
 authorization = os.environ.get("AUTHORIZATION")
+do_stream = os.environ.get("DO_STREAM", "true").lower() == "true"
 do_verify_ssl = os.environ.get("DO_VERIFY_SSL", "false").lower() == "true"
 
-print(f"starting with {url}")
+print(f"starting with {url}, do_stream={do_stream}, prop={prop}")
 
 session_factory = None
 
@@ -72,58 +76,52 @@ if authorization:
 else:
         session_factory = BasicUrlSystem({"headers": headers})
 
-logger.info('doing stuff')
-
-@app.route("/workorders", methods=["POST"])
+@app.route("/transform", methods=["POST"], endpoint='transform')
+@app.route("/sink", methods=["POST"], endpoint='sink')
 def receiver():
 
-    def do_request(session: requests.Session, method: str, entity: dict):
-        if method == 'update':
-            resp = session.put(f'{url}/ElWinAvtaler/api/workorders', json=entity)
-        elif method == 'get':
-            resp = session.get(f'{url}/ElWinAvtaler/api/workorders?externalIds={entity["ExternalId"]}')
-        elif method == 'create':
-            resp = session.post(f'{url}/ElWinAvtaler/api/workorders', json=entity)
-        returnval = resp.content.decode('UTF-8')
-        logger.debug(f'Method {method} for entity {entity["_id"]} gave response {returnval}')
-        print(f'Method {method} for entity {entity["_id"]} gave response {returnval}')
-        return returnval
+    service_config_property = request.args.get("service_config_property", "service_config")
+    path = request.args.get("path", "")
 
-    def generate(entities):
+    def generate(entities, endpoint):
+        yield "["
         with session_factory.make_session() as s:
-            for entity in entities:
-                # If entity has Id then we just update
-                if entity.get('Id', None) is not None:
-                    returnval = do_request(s, 'update', entity)
-                else: # Try to find entity based on externalId
-                    #If response is not JSON then we need to create the entity
-                    try:
-                        response_entity = json.loads(do_request(s, 'get', entity))
-                    except json.JSONDecodeError:
-                        logger.debug(f'Could not GET entity {entity["ExternalId"]}')
-                        print(f'Could not GET entity {entity["ExternalId"]}')
-                        response_entity = {}
+            for index, entity in enumerate(entities):
+                if index > 0:
+                    yield ","
+                url_per_entity, method_per_entity, headers_per_entity, prop_per_entity = url, method, headers, prop
+                if entity.get(service_config_property):
+                    _transform_config = entity.get(service_config_property)
+                    url_per_entity = _transform_config.get("URL", url) + path
+                    method_per_entity = _transform_config.get("METHOD", method_per_entity)
+                    headers_per_entity = copy.deepcopy(_transform_config.get("HEADERS"))
+                    prop_per_entity = _transform_config.get("PROPERTY", prop_per_entity)
+                url_template_per_entity = Template(url_per_entity)
+                rendered_url = url_template_per_entity.render(entity=entity)
 
-                    # If we find the Id then we update, else we create.
-                    if response_entity.get('Id', None) is not None:
-                        entity['Id'] = response_entity['Id']
-                        returnval = do_request(s, 'update', entity)
+                resp = s.request(method_per_entity, rendered_url, json=entity.get(payload_property),headers=headers_per_entity)
+                logger.debug(f'transform of entity with _id={entity.get("_id","?")}, prop_per_entity={prop_per_entity} received {resp.status_code}-{resp.text} from {rendered_url}')
+                if endpoint == 'transform':
+                    if resp.ok:
+                        entity[prop_per_entity] = resp.json()
                     else:
-                        if 'Id' in entity:
-                            del entity['Id']
-                        returnval = do_request(s, 'create', entity)
-
-        return returnval
-
-
-
+                        entity[prop_per_entity] = f'{resp.status_code} - {resp.text}'
+                elif endpoint == 'sink':
+                    if not resp.ok:
+                        abort(resp.status_code, resp.text)
+                yield json.dumps(entity)
+        yield "]"
 
     # get entities from request
     entities = request.get_json()
-    response_data = generate(entities)
-    logger.debug('i did something')
-    print('i did something')
-    return Response(response=response_data)
+    response_data_generator = generate(entities, request.endpoint)
+    response_data = []
+    if do_stream and request.endpoint != 'sink':
+        response_data = response_data_generator
+    else:
+        for entity in response_data_generator:
+            response_data.append(entity)
+    return Response(response=response_data, mimetype="application/json")
 
 
 if __name__ == "__main__":
